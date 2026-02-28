@@ -3,6 +3,13 @@
 All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.1] - 2026-02-28
+
+### Changed
+
+- Bump `dirs` 5 → 6, `signal-hook` 0.3 → 0.4, `toml` 0.8 → 1.0
+- Bump `actions/checkout` v4 → v6 in CI
+
 ## [1.0.0] - 2026-02-28
 
 Initial public release.
