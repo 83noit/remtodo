@@ -1,0 +1,11 @@
+.DS_Store
+repos/
+__pycache__/
+*.egg-info/
+.venv/
+dist/
+.eggs/
+*.pyc
+result
+target/
+swift/.build/
