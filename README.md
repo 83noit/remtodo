@@ -157,8 +157,8 @@ remtodo restore
 ┌─────────────────┐     JSON over stdout      ┌──────────────────────┐
 │  remtodo (Rust) │ ────────────────────────▶ │  reminders-helper    │
 │                 │                           │  (Swift, EventKit)   │
-│  sync engine    │ ◀─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ │                      │
-│  todo_lib crate │       reminder JSON        └──────────────────────┘
+│  sync engine    │ ◀─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─  │                      │
+│  todo_lib crate │       reminder JSON       └──────────────────────┘
 │  launchd agent  │
 └────────┬────────┘
          │ read / write
