@@ -42,7 +42,7 @@ mod tests {
             "completionDate": null,
             "creationDate": "2026-02-20",
             "lastModifiedDate": "2026-02-20T10:00:00Z",
-            "notes": "Get 2% from Costco",
+            "notes": "Call back dentist",
             "list": "Tasks"
         }"#;
         let r: Reminder = serde_json::from_str(json).unwrap();
@@ -58,7 +58,7 @@ mod tests {
             r.last_modified_date,
             Some("2026-02-20T10:00:00Z".to_string())
         );
-        assert_eq!(r.notes, Some("Get 2% from Costco".to_string()));
+        assert_eq!(r.notes, Some("Call back dentist".to_string()));
         assert_eq!(r.list, "Tasks");
     }
 
