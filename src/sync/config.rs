@@ -12,17 +12,21 @@ use crate::filter::Filter;
 /// Controls whether tasks that fall off the push filter are released from sync.
 ///
 /// - `Always` (or `true` in config): tasks are never released once tracked.
-/// - `Auto`: tasks are released when they change and are no longer admitted by
-///   any configured list. Push-origin tasks follow push_filter strictly; pull-
-///   origin (inbox) tasks are released only when another list admits them.
-/// - `Never` (or `false` in config): no sticky behaviour at all.
+/// - `Triage` (default, `"triage"` in config): tasks are released when they
+///   have been edited in todo.txt and no longer match the owning list's push
+///   filter. Unedited tasks (hash unchanged) are protected — they stay in
+///   Reminders regardless of filter drift.  This is the intended workflow:
+///   pull from Reminders → triage/edit in todo.txt → filter governs.
+/// - `Never` (or `false` in config): no sticky — release immediately on filter
+///   miss, with no task-change protection.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum StickyTracking {
-    /// Current default: never release once tracked. Backward-compatible with `true`.
+    /// Never release once tracked. Backward-compatible with `true`.
     Always,
-    /// Origin-aware release: release when task changes and no list admits it.
+    /// Edit-triggered release: any todo.txt edit on an off-filter task releases
+    /// it from Reminders. Unedited tasks are protected (inbox safety).
     #[default]
-    Auto,
+    Triage,
     /// No sticky: tasks that fall off push_filter are immediately released.
     Never,
 }
@@ -35,7 +39,7 @@ impl<'de> de::Deserialize<'de> for StickyTracking {
             type Value = StickyTracking;
 
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(f, r#"true, false, "always", "auto", or "never""#)
+                write!(f, r#"true, false, "always", "triage", or "never""#)
             }
 
             fn visit_bool<E: de::Error>(self, v: bool) -> Result<StickyTracking, E> {
@@ -49,11 +53,11 @@ impl<'de> de::Deserialize<'de> for StickyTracking {
             fn visit_str<E: de::Error>(self, v: &str) -> Result<StickyTracking, E> {
                 match v.to_ascii_lowercase().as_str() {
                     "always" => Ok(StickyTracking::Always),
-                    "auto" => Ok(StickyTracking::Auto),
+                    "triage" => Ok(StickyTracking::Triage),
                     "never" => Ok(StickyTracking::Never),
                     _ => Err(E::unknown_variant(
                         v,
-                        &["always", "auto", "never", "true", "false"],
+                        &["always", "triage", "never", "true", "false"],
                     )),
                 }
             }
@@ -278,7 +282,8 @@ pub struct ListSyncConfig {
     /// Controls whether tasks that fall off the push filter are released from sync.
     ///
     /// - `"always"` (or `true`): never release once tracked (backward compat).
-    /// - `"auto"` (default): release when task changes and no list admits it.
+    /// - `"triage"` (default): release when the task has been edited in todo.txt
+    ///   and no longer matches the push filter. Unedited tasks are protected.
     /// - `"never"` (or `false`): no sticky — release immediately on filter miss.
     #[serde(default)]
     pub sticky_tracking: StickyTracking,
@@ -314,7 +319,7 @@ impl Default for ListSyncConfig {
             reminders_list: String::new(),
             auto_context: None,
             push_filter: None,
-            sticky_tracking: StickyTracking::Auto,
+            sticky_tracking: StickyTracking::Triage,
             sync_initial_completed: false,
             priority_map: None,
             writeback: WritebackConfig::default(),

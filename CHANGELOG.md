@@ -3,6 +3,31 @@
 All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.1.0] - 2026-03-03
+
+### Changed
+
+- **`sticky_tracking` mode `"auto"` renamed to `"triage"`** — the old `auto`
+  mode distinguished between push-origin and pull-origin tasks: pull-origin
+  tasks (created in Reminders, pulled into todo.txt) would only be released
+  from Reminders if another configured list admitted them after an edit.
+  This caused reminders to persist indefinitely for the common inbox workflow
+  (Reminders → todo.txt → prioritise/edit → filter governs).  The new
+  `triage` mode uses a simpler rule: any edit to a task in todo.txt is the
+  triage signal; once edited, the push filter is authoritative.  Unedited
+  tasks retain their inbox protection regardless of origin.
+  **Migration:** replace `sticky_tracking = "auto"` with
+  `sticky_tracking = "triage"` in `config.toml`; `"auto"` is now a parse
+  error.
+
+### Fixed
+
+- Recurring tasks: the spawned next instance no longer inherits the parent's
+  `eid:` tag.  Previously `todo_lib`'s `cleanup_cloned_task()` did not strip
+  `eid:`, so the completed parent and the new instance shared the same EID.
+  This caused `verify_post_sync` to report a duplicate-EID warning on every
+  subsequent sync cycle.
+
 ## [1.0.1] - 2026-02-28
 
 ### Changed
@@ -43,7 +68,7 @@ Three reserved tags let tasks opt out of sync or trigger ejection:
   `priority:A`–`Z`, or `none` (default: priority 9 → `@today`)
 - Per-field writeback control: set `false` to make todo.txt authoritative
   for `title`, `due_date`, `priority`, or `is_completed`
-- Sticky tracking modes: `auto` (origin-aware release), `always`, `never`
+- Sticky tracking modes: `triage` (edit-triggered release), `always`, `never`
 
 ### Safety guards
 

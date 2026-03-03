@@ -58,7 +58,12 @@ pub fn collect_recurrence_spawns(actions: &[SyncAction], current_tasks: &[Task])
         // Collect the new instance if one was actually spawned (rec_until guard
         // inside todo::done() may suppress it).
         if temp.len() > 1 {
-            let spawn = temp.remove(1);
+            let mut spawn = temp.remove(1);
+            // Strip inherited eid so the spawn is treated as a brand-new task on the
+            // follow-up sync pass and gets a fresh eid from Reminders. Without this,
+            // the done parent and the spawn would share the same eid, triggering the
+            // duplicate-eid check in verify_post_sync.
+            spawn.update_tag("eid:");
             info!(
                 "Recurrence: spawning next instance of '{}' ({})",
                 spawn.subject,
@@ -85,6 +90,8 @@ mod tests {
 
     use super::collect_recurrence_spawns;
     use crate::sync::actions::SyncAction;
+    use crate::sync::engine::verify_post_sync;
+    use crate::sync::state::SyncState;
 
     fn base_date() -> NaiveDate {
         NaiveDate::from_ymd_opt(2026, 2, 25).unwrap()
@@ -121,6 +128,10 @@ mod tests {
             spawns[0].due_date,
             NaiveDate::from_ymd_opt(2026, 3, 4),
             "next due date should be 1 week after original due"
+        );
+        assert!(
+            spawns[0].tags.get("eid").is_none(),
+            "spawned task must not inherit parent eid"
         );
     }
 
@@ -185,6 +196,51 @@ mod tests {
             spawns.len(),
             0,
             "already-completed old task should not produce a second spawn"
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // Regression: spawn must not inherit parent eid (duplicate-eid bug)
+    // ----------------------------------------------------------------
+
+    /// Before the fix, `cleanup_cloned_task()` (in todo_lib) did not strip
+    /// `eid:`, so the spawned task silently inherited the parent's eid.  After
+    /// `apply_task_actions` marked the parent done, both the completed parent
+    /// and the spawn had the same `eid:`, which `verify_post_sync` reported as
+    /// a duplicate-eid issue on every subsequent sync cycle.
+    #[test]
+    fn spawn_eid_stripped_no_duplicate_eid_in_post_sync_task_list() {
+        let eid = "eid-recurring";
+        let old = task(&format!("Buy milk due:2026-02-25 rec:+1w eid:{eid}"));
+        let updated = completed_task(&format!("Buy milk due:2026-02-25 rec:+1w eid:{eid}"));
+
+        let actions = vec![SyncAction::UpdateTask {
+            eid: eid.to_string(),
+            updated_task: updated,
+        }];
+
+        let spawns = collect_recurrence_spawns(&actions, &[old.clone()]);
+        assert_eq!(spawns.len(), 1);
+
+        let spawn = &spawns[0];
+        assert!(
+            spawn.tags.get("eid").is_none(),
+            "spawn must not carry the parent eid; got {:?}",
+            spawn.tags.get("eid")
+        );
+
+        // Compose the post-sync task list as main.rs does: the completed
+        // parent (still carrying its eid) plus the freshly spawned task.
+        let completed_parent = task(&format!(
+            "x 2026-02-25 2026-02-25 Buy milk due:2026-02-25 rec:+1w eid:{eid}"
+        ));
+        let post_sync_tasks = [completed_parent, spawn.clone()];
+
+        // verify_post_sync should not report any duplicate-eid issue.
+        let issues = verify_post_sync(&post_sync_tasks, &SyncState::default());
+        assert!(
+            issues.iter().all(|s| !s.contains("duplicate eid")),
+            "unexpected duplicate-eid issue: {issues:?}"
         );
     }
 }

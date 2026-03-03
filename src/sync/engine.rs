@@ -146,17 +146,17 @@ pub fn build_initial_state(
 }
 
 /// Compute the set of eids that should be released from sync under
-/// `sticky_tracking = Auto`.
+/// `sticky_tracking = Triage`.
 ///
 /// A task is released when:
-/// 1. The owning list's `sticky_tracking` is `Auto`.
+/// 1. The owning list's `sticky_tracking` is `Triage`.
 /// 2. The task no longer matches the owning list's push filter.
-/// 3. The task's todo.txt line changed since the last sync (protects inbox
-///    tasks from time-based drift and preserves backward compatibility for
-///    existing state entries whose `pushed` defaulted to `true`).
-/// 4. Either:
-///    - `pushed = true` (push-origin: follows push_filter strictly), OR
-///    - another configured list admits the task (cross-list move for inbox).
+/// 3. The task's todo.txt line changed since the last sync (the edit is the
+///    triage signal; unedited tasks are protected against time-based drift).
+///
+/// No push-origin distinction is made — any edit to any task (push- or pull-
+/// origin) is sufficient. Once you've touched a task in todo.txt, the push
+/// filter is authoritative.
 ///
 /// Call this once before the per-list sync loop and pass the result to
 /// [`compute_sync_actions_ext`].
@@ -186,8 +186,8 @@ pub fn compute_release_set(
             None => continue, // unknown list — leave alone
         };
 
-        // Only apply release logic for Auto mode.
-        if owning_config.sticky_tracking != StickyTracking::Auto {
+        // Only apply release logic for Triage mode.
+        if owning_config.sticky_tracking != StickyTracking::Triage {
             continue;
         }
 
@@ -217,22 +217,8 @@ pub fn compute_release_set(
             continue;
         }
 
-        // Release if push-origin OR if another list now admits the task.
-        if state_item.pushed {
-            release.insert(eid.clone());
-        } else {
-            // Pull-origin: release only if another list admits (cross-list move).
-            let admitted_by_other = list_configs.iter().any(|lc| {
-                if lc.reminders_list == state_item.fields.list {
-                    return false;
-                }
-                let f = lc.compiled_push_filter();
-                task_matches_push_filter(task, lc, &f, today)
-            });
-            if admitted_by_other {
-                release.insert(eid.clone());
-            }
-        }
+        // The edit is the triage signal — no push-origin distinction needed.
+        release.insert(eid.clone());
     }
 
     release
@@ -390,7 +376,7 @@ pub fn compute_sync_actions_ext(
             // DeleteReminder via the release check; Always never does.
             let sticky = matches!(
                 config.sticky_tracking,
-                StickyTracking::Always | StickyTracking::Auto
+                StickyTracking::Always | StickyTracking::Triage
             );
             if admitted || (sticky && tracked_by_this_list) {
                 task_by_eid.insert(eid, t);
@@ -4537,11 +4523,11 @@ mod tests {
     // Category: sticky_tracking = Auto (release set)
     // ============================================================
 
-    fn auto_config_with_filter(filter: &str) -> ListSyncConfig {
+    fn triage_config_with_filter(filter: &str) -> ListSyncConfig {
         ListSyncConfig {
             reminders_list: "Tasks".to_string(),
             push_filter: Some(filter.to_string()),
-            sticky_tracking: crate::sync::config::StickyTracking::Auto,
+            sticky_tracking: crate::sync::config::StickyTracking::Triage,
             ..Default::default()
         }
     }
@@ -4591,33 +4577,44 @@ sticky_tracking = false"#;
     }
 
     #[test]
-    fn sticky_serde_string_auto() {
+    fn sticky_serde_string_triage() {
         let toml = r#"reminders_list = "Tasks"
-sticky_tracking = "auto""#;
+sticky_tracking = "triage""#;
         let cfg: ListSyncConfig = toml::from_str(toml).unwrap();
         assert_eq!(
             cfg.sticky_tracking,
-            crate::sync::config::StickyTracking::Auto
+            crate::sync::config::StickyTracking::Triage
         );
     }
 
     #[test]
-    fn sticky_serde_default_is_auto() {
+    fn sticky_serde_default_is_triage() {
         let toml = r#"reminders_list = "Tasks""#;
         let cfg: ListSyncConfig = toml::from_str(toml).unwrap();
         assert_eq!(
             cfg.sticky_tracking,
-            crate::sync::config::StickyTracking::Auto
+            crate::sync::config::StickyTracking::Triage
         );
     }
 
-    /// Pushed task that falls off filter and has changed → release set contains its eid.
     #[test]
-    fn compute_release_set_pushed_task_off_filter() {
+    fn sticky_serde_auto_is_invalid() {
+        // "auto" was removed; users must migrate to "triage".
+        let toml = r#"reminders_list = "Tasks"
+sticky_tracking = "auto""#;
+        assert!(
+            toml::from_str::<ListSyncConfig>(toml).is_err(),
+            r#""auto" must no longer be accepted as a sticky_tracking value"#
+        );
+    }
+
+    /// Any edited task (push-origin) that falls off filter → released.
+    #[test]
+    fn compute_release_set_edited_task_off_filter_released() {
         use super::compute_release_set;
 
         // push_filter: @today — task no longer has @today
-        let eid = "eid-pushed";
+        let eid = "eid-edited";
         let task = task_with_eid(eid, "Buy milk");
         let current_hash = task_line_hash(&task);
 
@@ -4626,13 +4623,13 @@ sticky_tracking = "auto""#;
         item.fields.list = "Tasks".to_string();
 
         let state = state_with_items(vec![item]);
-        let config = auto_config_with_filter("@today");
+        let config = triage_config_with_filter("@today");
         let today = base_date();
 
         let release = compute_release_set(&[task], &state, &[config], today);
         assert!(
             release.contains(eid),
-            "pushed task off filter with changed hash should be in release set"
+            "edited task off filter should be in release set"
         );
     }
 
@@ -4649,7 +4646,7 @@ sticky_tracking = "auto""#;
         item.fields.list = "Tasks".to_string();
 
         let state = state_with_items(vec![item]);
-        let config = auto_config_with_filter("@today");
+        let config = triage_config_with_filter("@today");
 
         let release = compute_release_set(&[task], &state, &[config], base_date());
         assert!(
@@ -4672,7 +4669,7 @@ sticky_tracking = "auto""#;
         item.fields.list = "Tasks".to_string();
 
         let state = state_with_items(vec![item]);
-        let config = auto_config_with_filter("@today");
+        let config = triage_config_with_filter("@today");
 
         let release = compute_release_set(&[task], &state, &[config], base_date());
         assert!(
@@ -4681,52 +4678,57 @@ sticky_tracking = "auto""#;
         );
     }
 
-    /// Inbox task with title fix but no other list admits → not released.
+    /// Pull-origin task with any edit that falls off filter → released.
+    ///
+    /// Core triage behaviour: the edit is the triage signal regardless of
+    /// whether the task was pull- or push-origin. "Cosmetic" edits count too —
+    /// once you touch a task you own its filter state.
     #[test]
-    fn inbox_not_released_on_cosmetic_edit_alone() {
+    fn pull_origin_released_after_any_edit_off_filter() {
         use super::compute_release_set;
 
         let eid = "eid-inbox2";
-        let task = task_with_eid(eid, "Buy milk fixed");
+        let task = task_with_eid(eid, "Buy milk fixed"); // title changed
         let current_hash = task_line_hash(&task);
 
-        // Stored hash differs (title changed) but no other list admits
+        // Stored hash differs (title edit), pushed=false (pull-origin)
         let mut item = synced_item_with_hash(eid, "Buy milk", current_hash + 1, false);
         item.fields.list = "Tasks".to_string();
 
         let state = state_with_items(vec![item]);
-        // Only one list configured, task doesn't match its filter
-        let config = auto_config_with_filter("@today");
+        let config = triage_config_with_filter("@today");
 
         let release = compute_release_set(&[task], &state, &[config], base_date());
         assert!(
-            !release.contains(eid),
-            "inbox task with cosmetic edit only (no other list admits) must not be released"
+            release.contains(eid),
+            "pull-origin task with any edit off filter must be released under Triage"
         );
     }
 
-    /// Inbox task triaged to @joint → second list admits → cross-list move → released.
+    /// Task edited + off owning-filter → released even when another list admits.
+    ///
+    /// Under Triage, cross-list admission is not required; the task is released
+    /// because it was edited (hash differs). The second list (To-do) will then
+    /// create a new Reminder in the cross-list move end-to-end flow.
     #[test]
-    fn inbox_released_on_cross_list_move() {
+    fn edited_task_released_when_another_list_admits() {
         use super::compute_release_set;
 
         let eid = "eid-triaged";
         let task = task_from_line(&format!("Buy milk @joint eid:{eid}"));
         let current_hash = task_line_hash(&task);
 
-        // Stored hash differs (triage added @joint)
+        // Stored hash differs — user added @joint
         let mut item = synced_item_with_hash(eid, "Buy milk", current_hash + 1, false);
         item.fields.list = "Tasks".to_string();
 
         let state = state_with_items(vec![item]);
 
-        // Tasks list: @today filter (no longer matches)
-        let tasks_config = auto_config_with_filter("@today");
-        // To-do list: @joint filter (now matches)
+        let tasks_config = triage_config_with_filter("@today"); // @joint no longer matches
         let todo_config = ListSyncConfig {
             reminders_list: "To-do".to_string(),
             push_filter: Some("@joint".to_string()),
-            sticky_tracking: crate::sync::config::StickyTracking::Auto,
+            sticky_tracking: crate::sync::config::StickyTracking::Triage,
             ..Default::default()
         };
 
@@ -4734,7 +4736,7 @@ sticky_tracking = "auto""#;
             compute_release_set(&[task], &state, &[tasks_config, todo_config], base_date());
         assert!(
             release.contains(eid),
-            "inbox task triaged to @joint (admitted by To-do) should be released from Tasks"
+            "edited task off Tasks filter should be released (To-do will pick it up)"
         );
     }
 
@@ -4765,6 +4767,210 @@ sticky_tracking = "auto""#;
         );
     }
 
+    // ── Triage mode: comprehensive scenario coverage ─────────────────────────
+
+    /// Unedited task off filter → stays (inbox protection regardless of origin).
+    #[test]
+    fn triage_unedited_task_off_filter_stays() {
+        use super::compute_release_set;
+
+        let eid = "eid-unedited";
+        let task = task_with_eid(eid, "Buy milk"); // no @today
+        let current_hash = task_line_hash(&task);
+
+        // Hash matches — task unchanged since last sync
+        let mut item = synced_item_with_hash(eid, "Buy milk", current_hash, false);
+        item.fields.list = "Tasks".to_string();
+
+        let state = state_with_items(vec![item]);
+        let config = triage_config_with_filter("@today");
+
+        let release = compute_release_set(&[task], &state, &[config], base_date());
+        assert!(
+            !release.contains(eid),
+            "unedited task off filter must not be released (inbox protection)"
+        );
+    }
+
+    /// Edited task still admitted by owning filter → not released.
+    #[test]
+    fn triage_edited_task_still_on_filter_stays() {
+        use super::compute_release_set;
+
+        let eid = "eid-still-admitted";
+        let task = task_from_line(&format!("Buy milk @today eid:{eid}")); // matches filter
+        let current_hash = task_line_hash(&task);
+
+        // Hash differs — task was edited (e.g. priority added)
+        let mut item = synced_item_with_hash(eid, "Buy milk @today", current_hash + 1, false);
+        item.fields.list = "Tasks".to_string();
+
+        let state = state_with_items(vec![item]);
+        let config = triage_config_with_filter("@today");
+
+        let release = compute_release_set(&[task], &state, &[config], base_date());
+        assert!(
+            !release.contains(eid),
+            "edited task still matching filter must not be released"
+        );
+    }
+
+    /// Pull-origin task, priority assigned in todo.txt, no longer matches
+    /// push_filter → released. This is the core user workflow:
+    ///   Reminders → todo.txt (inbox) → assign priority (triage) → remove from Reminders.
+    #[test]
+    fn triage_pull_origin_priority_assigned_off_filter_released() {
+        use super::compute_release_set;
+
+        let eid = "eid-joint-prioritised";
+
+        // Task as it looks after the user assigned priority C in todo.txt.
+        // The To-do push_filter requires @joint AND (@today OR due=..+1d).
+        // This task has @joint but no @today and no due → off filter.
+        let task = task_from_line(&format!("(C) Chairs @ Sarah @joint eid:{eid}"));
+        let current_hash = task_line_hash(&task);
+
+        // State: was pulled from To-do with no priority (hash differs → user edited)
+        let mut item = synced_item_with_hash(eid, "Chairs @ Sarah", current_hash + 1, false);
+        item.fields.list = "To-do".to_string();
+
+        let state = state_with_items(vec![item]);
+
+        // To-do list: must have @joint AND (@today OR due=..+1d)
+        let todo_config = ListSyncConfig {
+            reminders_list: "To-do".to_string(),
+            push_filter: Some("@joint;@today~@joint;due=..+1d".to_string()),
+            sticky_tracking: crate::sync::config::StickyTracking::Triage,
+            ..Default::default()
+        };
+
+        let release = compute_release_set(&[task], &state, &[todo_config], base_date());
+        assert!(
+            release.contains(eid),
+            "pull-origin task triaged with priority but off filter must be released"
+        );
+    }
+
+    /// Same setup as above but with Always → task stays despite edit.
+    #[test]
+    fn always_blocks_release_of_edited_pull_origin_task() {
+        use super::compute_release_set;
+
+        let eid = "eid-joint-always";
+        let task = task_from_line(&format!("(C) Tupperware lid @joint eid:{eid}"));
+        let current_hash = task_line_hash(&task);
+
+        let mut item = synced_item_with_hash(eid, "Tupperware lid", current_hash + 1, false);
+        item.fields.list = "To-do".to_string();
+
+        let state = state_with_items(vec![item]);
+
+        let todo_config = ListSyncConfig {
+            reminders_list: "To-do".to_string(),
+            push_filter: Some("@joint;@today~@joint;due=..+1d".to_string()),
+            sticky_tracking: crate::sync::config::StickyTracking::Always,
+            ..Default::default()
+        };
+
+        let release = compute_release_set(&[task], &state, &[todo_config], base_date());
+        assert!(
+            release.is_empty(),
+            "Always must block release even when task is edited and off filter"
+        );
+    }
+
+    /// Never mode: task unchanged + off filter → still released immediately
+    /// (task-change protection does not apply to Never mode).
+    #[test]
+    fn never_mode_releases_unchanged_task() {
+        use super::compute_sync_actions_ext;
+        use std::collections::HashSet;
+
+        let eid = "eid-never-unchanged";
+        let task = task_with_eid(eid, "Buy milk"); // no @today
+        let current_hash = task_line_hash(&task);
+
+        // Hash matches — task unchanged (Never doesn't check)
+        let item = synced_item_with_hash(eid, "Buy milk", current_hash, false);
+        let state = state_with_items(vec![item]);
+
+        let config = ListSyncConfig {
+            reminders_list: "Tasks".to_string(),
+            push_filter: Some("@today".to_string()),
+            sticky_tracking: crate::sync::config::StickyTracking::Never,
+            ..Default::default()
+        };
+        let reminder = ReminderBuilder::new(eid).title("Buy milk").build();
+
+        // Never mode: task absent from task_by_eid → Case C → DeleteReminder
+        let actions = compute_sync_actions_ext(
+            &[reminder],
+            &[task],
+            &state,
+            &config,
+            now(),
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert_deletes_reminder(&actions, eid);
+    }
+
+    /// End-to-end triage workflow matching the real config:
+    ///   1. @joint task pulled from To-do Reminders list (pushed=false)
+    ///   2. User assigns priority in todo.txt → hash changes
+    ///   3. Task has @joint but no @today/due → off To-do push_filter
+    ///   4. Expected: DeleteReminder for the To-do item
+    #[test]
+    fn triage_real_workflow_joint_task_prioritised_then_removed_from_reminders() {
+        use super::compute_release_set;
+        use super::compute_sync_actions_ext;
+
+        let eid = "eid-real-workflow";
+
+        // After triage: user added priority C, task has @joint but no @today, no near due.
+        let task = task_from_line(&format!("(C) Tupperware lid @joint eid:{eid} #buy"));
+        let current_hash = task_line_hash(&task);
+
+        // State: pulled from To-do, no priority (hash differs)
+        let mut state_item =
+            synced_item_with_hash(eid, "Tupperware lid #buy", current_hash + 1, false);
+        state_item.fields.list = "To-do".to_string();
+        let state = state_with_items(vec![state_item]);
+
+        // Config mirrors ~/config/remtodo: push @joint;@today OR @joint;due=..+1d
+        let todo_config = ListSyncConfig {
+            reminders_list: "To-do".to_string(),
+            push_filter: Some("@joint;@today~@joint;due=..+1d".to_string()),
+            sticky_tracking: crate::sync::config::StickyTracking::Triage,
+            ..Default::default()
+        };
+        let all_configs = vec![todo_config.clone()];
+
+        let release_eids = compute_release_set(&[task.clone()], &state, &all_configs, base_date());
+        assert!(
+            release_eids.contains(eid),
+            "triaged @joint task with no @today/due should enter release set"
+        );
+
+        let reminder = ReminderBuilder::new(eid)
+            .title("Tupperware lid #buy")
+            .list("To-do")
+            .build();
+        let actions = compute_sync_actions_ext(
+            &[reminder],
+            &[task],
+            &state,
+            &todo_config,
+            now(),
+            None,
+            &release_eids,
+            0,
+        );
+
+        assert_deletes_reminder(&actions, eid);
+    }
+
     /// Released pushed task emits DeleteReminder in Case A.
     #[test]
     fn released_pushed_task_emits_delete_reminder() {
@@ -4778,7 +4984,7 @@ sticky_tracking = "auto""#;
         let item = synced_item_with_hash(eid, "Buy milk", task_line_hash(&task), true);
         let state = state_with_items(vec![item]);
 
-        let config = auto_config_with_filter("@today");
+        let config = triage_config_with_filter("@today");
         let mut release_eids = HashSet::new();
         release_eids.insert(eid.to_string());
 
@@ -4824,7 +5030,7 @@ sticky_tracking = "auto""#;
         item.reminders_last_modified = Some(past_time());
         let state = state_with_items(vec![item]);
 
-        let config = auto_config_with_filter("@today");
+        let config = triage_config_with_filter("@today");
         let mut release_eids = HashSet::new();
         release_eids.insert(eid.to_string());
 
@@ -4878,7 +5084,7 @@ sticky_tracking = "auto""#;
     // Cross-list move end-to-end
     // ============================================================
 
-    /// Full cross-list move: inbox task triaged to @joint → Tasks releases it →
+    /// Full cross-list move: task gains @joint (edit) → Tasks releases it →
     /// To-do picks it up as CreateReminder in the same pass.
     ///
     /// Simulates the per-list loop in main.rs: run Tasks first (applying
@@ -4898,11 +5104,11 @@ sticky_tracking = "auto""#;
         state_item.fields.list = "Tasks".to_string();
         let state = state_with_items(vec![state_item]);
 
-        let tasks_config = auto_config_with_filter("@today"); // @joint no longer matches
+        let tasks_config = triage_config_with_filter("@today"); // @joint no longer matches
         let todo_config = ListSyncConfig {
             reminders_list: "To-do".to_string(),
             push_filter: Some("@joint".to_string()),
-            sticky_tracking: crate::sync::config::StickyTracking::Auto,
+            sticky_tracking: crate::sync::config::StickyTracking::Triage,
             ..Default::default()
         };
         let all_configs = vec![tasks_config.clone(), todo_config.clone()];
@@ -4985,7 +5191,7 @@ sticky_tracking = "auto""#;
         let todo_config = ListSyncConfig {
             reminders_list: "To-do".to_string(),
             push_filter: Some("@joint".to_string()),
-            sticky_tracking: crate::sync::config::StickyTracking::Auto,
+            sticky_tracking: crate::sync::config::StickyTracking::Triage,
             ..Default::default()
         };
 
