@@ -3,6 +3,30 @@
 All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.1.1] - 2026-03-03
+
+### Added
+
+- `remtodo --version` / `-V` / `version` — print the version string and exit.
+
+### Fixed
+
+- **Orphan `eid:` tags after Triage release**: when `sticky_tracking = "triage"`
+  released a task from Reminders, the state entry was removed but the `eid:`
+  tag was left on the task in todo.txt.  On every subsequent sync this produced
+  a `verify_post_sync` "no state entry" warning.  The fix strips `eid:` from
+  the task at release time; a one-time cleanup pass also heals tasks left in
+  this state by the initial v1.1.0 run.
+
+- **Hash mismatch warnings for untracked field changes**: `task_line_hash`
+  covers the full task line, but `three_way_diff` only tracks five synced
+  fields (title, due date, priority, completion status, completion date).
+  Editing an untracked field — adding or removing a context, project, `rec:`
+  tag, or any other custom tag — produced a `verify_post_sync` "hash mismatch"
+  warning on every cycle, and could cause an incorrect `ResurrectReminder`
+  instead of `DeleteTask` in Case B.  A hash-reconciliation pass at the end
+  of each action cycle now keeps the stored hash accurate.
+
 ## [1.1.0] - 2026-03-03
 
 ### Changed

@@ -752,8 +752,18 @@ pub fn apply_task_actions(
             }
 
             SyncAction::DeleteReminder { eid } => {
-                // Task is already gone. Remove state entry.
+                // Remove the state entry.  In Case C the task is already absent,
+                // so the loop below is a no-op.  In the Triage release path the
+                // task is still present — strip its eid: tag so it doesn't generate
+                // a spurious "no state entry" warning on the next sync cycle, and
+                // so the push_filter can re-admit it to a new list if applicable.
                 new_state.items.remove(eid.as_str());
+                for t in &mut tasks {
+                    if task_eid(t).map(|e| e == eid.as_str()).unwrap_or(false) {
+                        t.update_tag_with_value("eid", "");
+                        break;
+                    }
+                }
             }
 
             SyncAction::ResurrectTask { eid, task } => {
@@ -861,6 +871,65 @@ pub fn apply_task_actions(
                     }
                     item.last_synced = now;
                     new_state.items.insert(new_eid.clone(), item);
+                }
+            }
+        }
+    }
+
+    // Orphan eid cleanup: strip eid: tags from tasks whose eid is no longer in
+    // state.  This heals carry-over orphans left by older code that removed the
+    // state entry on release but did not strip the tag.  After the fix to
+    // DeleteReminder (above), new releases no longer produce orphans; this pass
+    // is a safety net for any that slipped through before the fix was deployed.
+    //
+    // A task with a stale eid that is NOT in state will generate a "no state
+    // entry" warning every cycle and, in Case B, would spuriously resurrect the
+    // reminder instead of deleting the task.  Stripping the tag lets the
+    // push_filter re-admit the task to a new list on the next cycle if applicable.
+    //
+    // Safety: `new_state` is a clone of the full `current_state` and therefore
+    // contains items from ALL configured lists — not just the one being processed
+    // here.  A task tracked by another list will find its eid in `new_state.items`
+    // and be left alone.
+    for t in &mut tasks {
+        if let Some(eid) = task_eid(t) {
+            if !eid.is_empty() && !is_sentinel_eid(eid) && !new_state.items.contains_key(eid) {
+                debug!(
+                    "orphan eid cleanup: stripping stale eid:{eid} from task '{}' \
+                     (state entry absent — carry-over from pre-fix release cycle)",
+                    extract_title(t)
+                );
+                t.update_tag_with_value("eid", "");
+            }
+        }
+    }
+
+    // Hash reconciliation pass: ensure task_line_hash is accurate for all tracked
+    // tasks after applying actions.  three_way_diff only covers five tracked fields
+    // (title, due_date, priority, is_completed, completion_date); changes to
+    // untracked fields (contexts, projects, rec:, custom tags) never trigger an
+    // action, so the stored hash can fall behind the actual task.  A stale hash
+    // would (a) generate a spurious verify_post_sync warning on every cycle and
+    // (b) mis-classify the task as "changed" in the Case B (reminder absent) path,
+    // causing a spurious ResurrectReminder instead of the correct DeleteTask.
+    //
+    // This pass is a state-only update: it never modifies the task list or triggers
+    // any Reminders-side I/O.  Discrepancies are logged at debug level so that
+    // genuine engine bugs remain visible in debug output.
+    {
+        let task_by_eid: HashMap<&str, &Task> = tasks
+            .iter()
+            .filter_map(|t| task_eid(t).map(|eid| (eid, t)))
+            .collect();
+        for (eid, item) in new_state.items.iter_mut() {
+            if let Some(&task) = task_by_eid.get(eid.as_str()) {
+                let h = task_line_hash(task);
+                if h != item.task_line_hash {
+                    debug!(
+                        "hash reconciliation: refreshing stale task_line_hash for eid:{eid} \
+                         (untracked field change — contexts/projects/tags not visible to three_way_diff)"
+                    );
+                    item.task_line_hash = h;
                 }
             }
         }
@@ -4210,6 +4279,145 @@ mod tests {
                 .iter()
                 .any(|s| s.contains("eid:orphan") && s.contains("no state entry")),
             "missing orphan issue: {issues:?}"
+        );
+    }
+
+    // ── Fix: DeleteReminder in release path strips eid tag ──────────────────────
+
+    /// Regression for the "no state entry" warnings produced after Triage releases
+    /// a task.  Before the fix, `apply_task_actions` removed the state entry but
+    /// left the `eid:` tag on the task; `verify_post_sync` would then report
+    /// "no state entry" on every subsequent sync until the user manually stripped
+    /// the tag.
+    #[test]
+    fn delete_reminder_release_path_strips_eid_from_task() {
+        let eid = "eid-released";
+        let task = task_from_line(&format!("Buy milk eid:{eid}"));
+        let mut item = synced_item(eid, "Buy milk");
+        item.task_line_hash = task_line_hash(&task);
+        let state = state_with_items(vec![item]);
+
+        let action = SyncAction::DeleteReminder {
+            eid: eid.to_string(),
+        };
+        let (tasks, new_state) =
+            apply_task_actions(&[action], vec![task], &state, &default_config(), now());
+
+        // Task is kept (not deleted).
+        assert_eq!(tasks.len(), 1, "task must remain in the list");
+        // eid: tag must be stripped so push_filter can re-admit it to a new list.
+        assert!(
+            tasks[0].tags.get("eid").is_none(),
+            "DeleteReminder in release path must strip eid: tag; got {:?}",
+            tasks[0].tags.get("eid")
+        );
+        // State entry must be removed.
+        assert!(
+            !new_state.items.contains_key(eid),
+            "state entry must be removed"
+        );
+        // verify_post_sync must report no issues (no orphan eid warning).
+        let issues = verify_post_sync(&tasks, &new_state);
+        assert!(
+            issues.is_empty(),
+            "verify_post_sync must be clean after DeleteReminder fix: {issues:?}"
+        );
+    }
+
+    // ── Fix: orphan eid cleanup ──────────────────────────────────────────────────
+
+    /// Carry-over orphan eids (eid in task but not in state) are stripped by
+    /// apply_task_actions.  This heals tasks left behind by pre-fix code that
+    /// removed the state entry on release but did not strip the eid: tag.
+    #[test]
+    fn orphan_eid_stripped_by_apply_task_actions() {
+        let eid = "eid-orphan";
+        // Task has an eid but there is no state entry for it — simulates a
+        // task that was released by a previous sync run before the fix.
+        let task = task_from_line(&format!("Buy milk eid:{eid}"));
+
+        // No actions, empty state — the orphan cleanup pass must fire.
+        let (tasks, new_state) = apply_task_actions(
+            &[],
+            vec![task],
+            &SyncState::default(),
+            &default_config(),
+            now(),
+        );
+
+        assert_eq!(tasks.len(), 1, "task must remain");
+        assert!(
+            tasks[0].tags.get("eid").is_none(),
+            "orphan eid must be stripped; got {:?}",
+            tasks[0].tags.get("eid")
+        );
+        assert!(new_state.items.is_empty(), "state must be empty");
+
+        // verify_post_sync must now report no issues.
+        let issues = verify_post_sync(&tasks, &new_state);
+        assert!(
+            issues.is_empty(),
+            "verify_post_sync must be clean after orphan cleanup: {issues:?}"
+        );
+    }
+
+    /// A task tracked by another list (eid in state from that list) must NOT
+    /// have its eid stripped by the orphan cleanup pass.
+    #[test]
+    fn orphan_cleanup_does_not_strip_eid_tracked_by_another_list() {
+        let eid = "eid-other-list";
+        let task = task_from_line(&format!("Buy milk eid:{eid}"));
+        // State entry exists (from another list) — task is legitimately tracked.
+        let mut item = synced_item(eid, "Buy milk");
+        item.task_line_hash = task_line_hash(&task);
+        let state = state_with_items(vec![item]);
+
+        let (tasks, _) = apply_task_actions(&[], vec![task], &state, &default_config(), now());
+
+        assert_eq!(
+            tasks[0].tags.get("eid").map(|s| s.as_str()),
+            Some(eid),
+            "eid must not be stripped when a state entry exists"
+        );
+    }
+
+    // ── Fix: hash reconciliation for untracked field changes ────────────────────
+
+    /// Regression for the "hash mismatch" warnings produced when a user modifies
+    /// untracked fields (contexts, projects, custom tags).  `three_way_diff` only
+    /// covers five synced fields; an untracked change left `task_line_hash` stale.
+    /// The reconciliation pass at the end of `apply_task_actions` fixes this.
+    #[test]
+    fn hash_reconciliation_updates_stale_hash_for_untracked_change() {
+        let eid = "eid-untracked";
+        // Task has had @joint added — an untracked field change.
+        let task = task_from_line(&format!("Buy milk @joint eid:{eid}"));
+        let current_hash = task_line_hash(&task);
+
+        // State was recorded before @joint was added → hash is stale.
+        let old_hash = task_line_hash(&task_from_line(&format!("Buy milk eid:{eid}")));
+        assert_ne!(
+            current_hash, old_hash,
+            "hashes must differ to set up the test"
+        );
+
+        let mut item = synced_item(eid, "Buy milk");
+        item.task_line_hash = old_hash;
+        let state = state_with_items(vec![item]);
+
+        // No actions — three_way_diff sees no tracked-field change.
+        let (tasks, new_state) =
+            apply_task_actions(&[], vec![task], &state, &default_config(), now());
+
+        assert_eq!(
+            new_state.items[eid].task_line_hash, current_hash,
+            "reconciliation must refresh stale task_line_hash after untracked change"
+        );
+        // verify_post_sync must report no hash mismatch.
+        let issues = verify_post_sync(&tasks, &new_state);
+        assert!(
+            issues.is_empty(),
+            "verify_post_sync must be clean after hash reconciliation: {issues:?}"
         );
     }
 

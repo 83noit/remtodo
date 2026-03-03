@@ -971,6 +971,13 @@ fn run() -> Result<(), SyncError> {
     }
 
     let subcommand = args[1].as_str();
+
+    // Handle --version / -V before anything else (no logging, no config needed).
+    if subcommand == "--version" || subcommand == "-V" || subcommand == "version" {
+        println!("remtodo {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     match subcommand {
         "sync" | "install" | "uninstall" | "status" | "restore" => {}
         other => {
