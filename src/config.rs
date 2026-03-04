@@ -233,7 +233,7 @@ mod tests {
 
     #[test]
     fn expand_tilde_absolute_path_unchanged() {
-        let p = "/home/user/Notes/Tasks/todo.txt";
+        let p = "/Users/benb/Notes/Tasks/Todo.md";
         assert_eq!(expand_tilde(p), p);
     }
 

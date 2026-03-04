@@ -5035,11 +5035,11 @@ sticky_tracking = "auto""#;
         // Task as it looks after the user assigned priority C in todo.txt.
         // The To-do push_filter requires @joint AND (@today OR due=..+1d).
         // This task has @joint but no @today and no due → off filter.
-        let task = task_from_line(&format!("(C) Folding table @joint eid:{eid}"));
+        let task = task_from_line(&format!("(C) Chairs @ Sarah @joint eid:{eid}"));
         let current_hash = task_line_hash(&task);
 
         // State: was pulled from To-do with no priority (hash differs → user edited)
-        let mut item = synced_item_with_hash(eid, "Folding table", current_hash + 1, false);
+        let mut item = synced_item_with_hash(eid, "Chairs @ Sarah", current_hash + 1, false);
         item.fields.list = "To-do".to_string();
 
         let state = state_with_items(vec![item]);
@@ -5065,10 +5065,10 @@ sticky_tracking = "auto""#;
         use super::compute_release_set;
 
         let eid = "eid-joint-always";
-        let task = task_from_line(&format!("(C) Extension cord @joint eid:{eid}"));
+        let task = task_from_line(&format!("(C) Tupperware lid @joint eid:{eid}"));
         let current_hash = task_line_hash(&task);
 
-        let mut item = synced_item_with_hash(eid, "Extension cord", current_hash + 1, false);
+        let mut item = synced_item_with_hash(eid, "Tupperware lid", current_hash + 1, false);
         item.fields.list = "To-do".to_string();
 
         let state = state_with_items(vec![item]);
@@ -5137,12 +5137,12 @@ sticky_tracking = "auto""#;
         let eid = "eid-real-workflow";
 
         // After triage: user added priority C, task has @joint but no @today, no near due.
-        let task = task_from_line(&format!("(C) Extension cord @joint eid:{eid} #buy"));
+        let task = task_from_line(&format!("(C) Tupperware lid @joint eid:{eid} #buy"));
         let current_hash = task_line_hash(&task);
 
         // State: pulled from To-do, no priority (hash differs)
         let mut state_item =
-            synced_item_with_hash(eid, "Extension cord #buy", current_hash + 1, false);
+            synced_item_with_hash(eid, "Tupperware lid #buy", current_hash + 1, false);
         state_item.fields.list = "To-do".to_string();
         let state = state_with_items(vec![state_item]);
 
@@ -5162,7 +5162,7 @@ sticky_tracking = "auto""#;
         );
 
         let reminder = ReminderBuilder::new(eid)
-            .title("Extension cord #buy")
+            .title("Tupperware lid #buy")
             .list("To-do")
             .build();
         let actions = compute_sync_actions_ext(

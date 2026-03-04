@@ -357,7 +357,7 @@ mod tests {
             completion_date: Some("2026-02-28".to_string()),
             creation_date: None,
             last_modified_date: None,
-            notes: Some("call back dentist".to_string()),
+            notes: Some("2% from Costco".to_string()),
             list: "Shopping".to_string(),
         };
 
@@ -370,7 +370,7 @@ mod tests {
         assert_eq!(update.is_completed, Some(true));
         assert_eq!(update.completion_date, Some(Some("2026-02-28".to_string())));
         assert_eq!(update.due_date, Some(Some("2026-03-01".to_string())));
-        assert_eq!(update.notes, Some(Some("call back dentist".to_string())));
+        assert_eq!(update.notes, Some(Some("2% from Costco".to_string())));
     }
 
     #[test]
@@ -385,7 +385,7 @@ mod tests {
             completion_date: None,
             creation_date: None,
             last_modified_date: None,
-            notes: Some("fragile".to_string()),
+            notes: Some("organic".to_string()),
             list: "Shopping".to_string(),
         };
 
@@ -395,7 +395,7 @@ mod tests {
         assert_eq!(input.list_name, "Shopping");
         assert_eq!(input.priority, 5);
         assert_eq!(input.due_date, Some("2026-03-01".to_string()));
-        assert_eq!(input.notes, Some("fragile".to_string()));
+        assert_eq!(input.notes, Some("organic".to_string()));
         assert!(!input.is_completed);
         assert!(input.completion_date.is_none());
     }

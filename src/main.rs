@@ -601,6 +601,69 @@ fn sync_once(
     }
     let mut current_state = state_opt.unwrap();
 
+    // Strip duplicate eid: tags caused by external tools (e.g. TTDL completing a
+    // recurring task directly).  `todo::done()` in todo_lib inherits all tags
+    // including `eid:`, so the spawned next-instance ends up sharing the eid of the
+    // completed parent.  Our own `collect_recurrence_spawns` strips the eid, but that
+    // only runs for completions triggered *by* remtodo.  When TTDL is used directly
+    // we must detect and fix the duplication here before the engine sees the tasks.
+    //
+    // Rule: for each eid that appears on more than one task, keep the eid on the task
+    // whose `task_line_hash` matches state (the "baseline" copy).  If none match
+    // state, keep the eid on the first (earliest) occurrence.  Strip from all others.
+    {
+        use std::collections::HashMap;
+        let mut first_by_eid: HashMap<String, usize> = HashMap::new();
+        for (i, t) in current_tasks.iter().enumerate() {
+            if let Some(eid) = t.tags.get("eid").map(|e| e.as_str()) {
+                if !eid.is_empty() && !eid.starts_with("na") && !eid.starts_with("ns") {
+                    first_by_eid.entry(eid.to_string()).or_insert(i);
+                }
+            }
+        }
+        // Collect indices that need their eid stripped.
+        let mut strip_indices: Vec<usize> = Vec::new();
+        for (i, t) in current_tasks.iter().enumerate() {
+            if let Some(eid) = t.tags.get("eid").map(|e| e.as_str()) {
+                if eid.is_empty() || eid.starts_with("na") || eid.starts_with("ns") {
+                    continue;
+                }
+                let canonical = *first_by_eid.get(eid).unwrap_or(&i);
+                if i != canonical {
+                    // Prefer the copy whose hash matches state as the canonical one.
+                    let state_hash = current_state
+                        .items
+                        .get(eid)
+                        .map(|s| s.task_line_hash)
+                        .unwrap_or(0);
+                    let current_hash = task_line_hash(t);
+                    let canonical_hash = task_line_hash(&current_tasks[canonical]);
+                    if state_hash != 0 && current_hash == state_hash && canonical_hash != state_hash
+                    {
+                        // This copy matches state — it becomes canonical; strip the other.
+                        strip_indices.push(canonical);
+                        *first_by_eid.get_mut(eid).unwrap() = i;
+                    } else {
+                        strip_indices.push(i);
+                    }
+                }
+            }
+        }
+        for idx in strip_indices {
+            let eid = current_tasks[idx]
+                .tags
+                .get("eid")
+                .cloned()
+                .unwrap_or_default();
+            current_tasks[idx].update_tag("eid:");
+            debug!(
+                "Stripped duplicate eid:{} from TTDL-spawned recurrence instance '{}' (index {idx})",
+                eid,
+                extract_title(&current_tasks[idx])
+            );
+        }
+    }
+
     if !dry_run {
         create_pre_sync_backup(output, &state_path, state_dir)?;
     }

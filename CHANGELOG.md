@@ -3,6 +3,21 @@
 All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.1.2] - 2026-03-04
+
+### Fixed
+
+- **Duplicate `eid:` on TTDL-spawned recurrence instances**: completing a
+  recurring task via `ttdl done` directly caused `todo_lib`'s
+  `cleanup_cloned_task()` to inherit the parent's `eid:` on the spawned next
+  instance (only `tmr:` and `spent:` are stripped by the library).  The
+  previous fix in v1.1.0 covered completions triggered *by* `remtodo sync`
+  but not external completions.  A pre-sync dedup pass now detects tasks
+  sharing an `eid:`, keeps it on the baseline copy (matched against the
+  stored `task_line_hash`), and strips it from duplicates so the spawn
+  receives a fresh Reminder on the next sync.  Recurring tasks may now be
+  completed freely via either `remtodo sync` or `ttdl done`.
+
 ## [1.1.1] - 2026-03-03
 
 ### Added
