@@ -3,6 +3,30 @@
 All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.2.0] - 2026-03-15
+
+### Changed
+
+- **Upgrade `todo_lib` to v11**: the dependency now tracks the same major
+  version as TTDL itself, ensuring field parsing and task serialisation stay
+  in sync with the upstream library.
+
+- **`push_filter` now backed by `todo_lib::flt`**: the custom filter parser
+  (~670 lines) has been replaced with a thin wrapper around the `flt` module
+  that ships with `todo_lib` v11.  The public API and all existing config
+  strings are unchanged; shorthand normalisations (`@ctx`, `+prj`, `#tag`,
+  `-@ctx`, `-+prj`) and `+Nd`/`+Nw` date-offset syntax continue to work as
+  before.  The upgrade brings the full upstream filter DSL for free: hashtag
+  conditions (`#=tag`), subject-text search (`subj=`), custom key/value tag
+  filters (e.g. `rec=any`), and threshold-date comparisons (`t=..today`).
+
+### Fixed
+
+- **Date-sensitive recurrence test**: the `recurring_completion_spawns_next_instance`
+  unit test used a hard-coded past due date; `todo_lib`'s `done()` advances
+  strict recurrences past today, so the expected date drifted as calendar time
+  passed.  The test now uses a far-future due date to remain deterministic.
+
 ## [1.1.2] - 2026-03-04
 
 ### Fixed

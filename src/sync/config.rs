@@ -348,17 +348,9 @@ impl ListSyncConfig {
     /// Parse and return the compiled push filter, if one is configured.
     ///
     /// Returns `None` when no `push_filter` is set (fall back to `auto_context`).
-    /// Logs a warning and returns `Filter::deny_all()` on parse error.
+    /// An unrecognised filter string silently produces `Filter::deny_all()`.
     pub fn compiled_push_filter(&self) -> Option<Filter> {
-        self.push_filter.as_deref().map(|s| {
-            Filter::parse(s).unwrap_or_else(|e| {
-                log::warn!(
-                    "Invalid push_filter for list '{}': {e}",
-                    self.reminders_list
-                );
-                Filter::deny_all()
-            })
-        })
+        self.push_filter.as_deref().map(Filter::parse)
     }
 
     /// Return the compiled priority map for this list.

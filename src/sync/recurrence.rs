@@ -113,9 +113,11 @@ mod tests {
 
     #[test]
     fn recurring_completion_spawns_next_instance() {
-        // rec:+1w (strict mode) advances from the original due date, making this deterministic.
-        let old = task("Buy milk due:2026-02-25 rec:+1w eid:eid1");
-        let updated = completed_task("Buy milk due:2026-02-25 rec:+1w eid:eid1");
+        // rec:+1w (strict mode) advances from the original due date, not from today.
+        // Use a far-future due date so the first advancement always lands > today,
+        // keeping the assertion deterministic regardless of when the test is run.
+        let old = task("Buy milk due:2099-01-01 rec:+1w eid:eid1");
+        let updated = completed_task("Buy milk due:2099-01-01 rec:+1w eid:eid1");
 
         let actions = vec![SyncAction::UpdateTask {
             eid: "eid1".to_string(),
@@ -126,7 +128,7 @@ mod tests {
         assert_eq!(spawns.len(), 1, "expected exactly one spawn");
         assert_eq!(
             spawns[0].due_date,
-            NaiveDate::from_ymd_opt(2026, 3, 4),
+            NaiveDate::from_ymd_opt(2099, 1, 8),
             "next due date should be 1 week after original due"
         );
         assert!(

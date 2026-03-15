@@ -348,6 +348,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "lazy_static"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
+
+[[package]]
 name = "leb128fmt"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -504,7 +510,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "remtodo"
-version = "1.1.2"
+version = "1.2.0"
 dependencies = [
  "chrono",
  "dirs",
@@ -668,11 +674,12 @@ dependencies = [
 
 [[package]]
 name = "todo_lib"
-version = "10.1.0"
+version = "11.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d05e88b7197065c57d92301123c4bba50e440eaefe586ae86b6b555c73b03d8b"
+checksum = "bc0ac8bb4f56071ab6b57b739408ceeaf02e47b2ffdf4672f5b3f80292b33a4f"
 dependencies = [
  "chrono",
+ "lazy_static",
  "regex",
  "thiserror",
 ]

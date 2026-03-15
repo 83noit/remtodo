@@ -1,442 +1,137 @@
 //! TTDL-compatible push-filter expression parser and evaluator.
 //!
-//! Syntax (subset of TTDL `--filter`):
+//! Wraps `todo_lib::flt::Filter` with OR-group handling and shorthand
+//! normalisation so that existing `push_filter` config strings remain valid:
 //!
 //! ```text
-//! filter = rule ('~' rule)*
-//! rule   = cond (';' cond)*
-//! cond   = '@'text           -- include context
-//!        | '-@'text          -- exclude context
-//!        | '+'text           -- include project
-//!        | '-+'text          -- exclude project
-//!        | field '=' value
-//! field  = 'context' | 'ctx' | 'project' | 'prj'
-//!        | 'priority' | 'pri' | 'due' | 'done'
-//! value  = 'any' | 'none' | text | pri-spec | date-spec
+//! filter = rule ('~' rule)*        -- rules are OR-combined
+//! rule   = cond (';' cond)*        -- conditions within a rule are AND-combined (flt native)
+//! cond   = '@'ctx                  -- include context   (normalised → @=ctx)
+//!        | '-@'ctx                 -- exclude context   (normalised → -@=ctx)
+//!        | '+'prj                  -- include project   (normalised → +=prj)
+//!        | '-+'prj                 -- exclude project   (normalised → -+=prj)
+//!        | '#'tag                  -- include hashtag   (normalised → #=tag)
+//!        | field '=' value         -- flt native conditions (passed through)
 //! ```
 //!
-//! Rules are OR-combined; conditions within a rule are AND-combined.
+//! Date offsets: `+Nd`/`+Nw`/`+Nm` are normalised to `Nd`/`Nw`/`Nm` so
+//! that `due=..+1d` works just like `due=..1d` in `flt`.
+//!
 //! Examples:
-//!   `@joint;due=..+2d`       — @joint context AND due within 2 days
+//!   `@joint;due=..1d`        — @joint context AND due within 1 day
 //!   `@today~pri=any~due=any` — @today OR any priority OR any due date
 
 use chrono::NaiveDate;
+use todo_lib::flt;
 use todo_lib::todotxt::Task;
-
-const NO_PRIORITY: u8 = todo_lib::todotxt::NO_PRIORITY;
 
 /// A parsed push-filter expression.
 ///
-/// Rules are OR-combined; conditions within a rule are AND-combined.
-#[derive(Debug, Clone)]
+/// Rules are OR-combined (split on `~` or `|`); conditions within a rule
+/// are AND-combined (split on `;` by `flt::Filter::parse()`).
 pub struct Filter {
-    rules: Vec<Rule>,
+    groups: Vec<flt::Filter>,
 }
-
-#[derive(Debug, Clone)]
-struct Rule {
-    conditions: Vec<Condition>,
-}
-
-#[derive(Debug, Clone)]
-enum Condition {
-    Context { pat: StrPat, include: bool },
-    Project { pat: StrPat, include: bool },
-    Priority(PriSpec),
-    Due(DueSpec),
-    Done(bool),
-}
-
-/// Pattern match for string fields (contexts, projects).
-#[derive(Debug, Clone)]
-enum StrPat {
-    Any,
-    None,
-    Prefix(String),
-    Suffix(String),
-    Contains(String),
-    Exact(String),
-}
-
-/// Priority filter specification.
-///
-/// In todo_lib, priority is stored as a `u8` where A=0, B=1, ..., Z=25,
-/// and `NO_PRIORITY`=26 means no priority set.
-/// "Higher" priority means a lower `u8` value.
-#[derive(Debug, Clone)]
-enum PriSpec {
-    /// Any priority set (`pri=any`)
-    Any,
-    /// No priority (`pri=none`)
-    None,
-    /// Exact letter (`pri=b` → u8 = 1)
-    Exact(u8),
-    /// This priority or higher/more-important (`pri=b+` → u8 ≤ 1, i.e. A or B)
-    AtLeast(u8),
-    /// Inclusive range (`pri=a..c` → 0 ≤ u8 ≤ 2)
-    Range(u8, u8),
-}
-
-/// Due-date filter specification.
-///
-/// Day offsets are relative to today (0 = today, 1 = tomorrow, -1 = yesterday).
-/// All variants except `Any` and `None` require the task to *have* a due date.
-#[derive(Debug, Clone)]
-enum DueSpec {
-    /// Has any due date (`due=any`)
-    Any,
-    /// Has no due date (`due=none`)
-    None,
-    /// Due-diff ≤ n (`due=..+2d`)
-    UpTo(i64),
-    /// Due-diff ≥ n (`due=+2d..`)
-    From(i64),
-    /// n1 ≤ due-diff ≤ n2 (`due=today..+5d`)
-    Between(i64, i64),
-    /// Due-diff == n (`due=today`, `due=+1d`)
-    On(i64),
-}
-
-// ============================================================
-// Public API
-// ============================================================
 
 impl Filter {
-    /// Parse a filter expression string. Returns an error message on failure.
-    pub fn parse(s: &str) -> Result<Self, String> {
-        let rules = s
-            .split(['~', '|'])
-            .map(|r| Rule::parse(r.trim()))
-            .collect::<Result<Vec<_>, _>>()?;
-        if rules.is_empty() {
-            return Err("empty filter expression".to_string());
-        }
-        Ok(Filter { rules })
+    /// Parse a filter expression string (infallible — bad input produces empty groups).
+    pub fn parse(s: &str) -> Self {
+        let or_char = if s.contains('~') { '~' } else { '|' };
+        let groups = s
+            .split(or_char)
+            .map(|g| g.trim())
+            .filter(|g| !g.is_empty())
+            .map(|g| flt::Filter::parse(&normalize_shorthands(g), false))
+            .filter(|f| !f.is_empty())
+            .collect();
+        Filter { groups }
     }
 
-    /// Returns a filter that never matches anything (used on parse error).
+    /// Returns a filter that never matches anything (used as a safe fallback).
     pub fn deny_all() -> Self {
-        Filter { rules: vec![] }
+        Filter { groups: vec![] }
     }
 
     /// Returns `true` if the task matches this filter, evaluated against `today`.
     pub fn matches(&self, task: &Task, today: NaiveDate) -> bool {
-        self.rules.iter().any(|r| r.matches(task, today))
+        self.groups.iter().any(|f| f.matches(task, 0, today))
     }
 }
 
-// ============================================================
-// Rule
-// ============================================================
-
-impl Rule {
-    fn parse(s: &str) -> Result<Self, String> {
-        let conditions = s
-            .split(';')
-            .map(|c| Condition::parse(c.trim()))
-            .collect::<Result<Vec<_>, _>>()?;
-        if conditions.is_empty() {
-            return Err("empty rule".to_string());
-        }
-        Ok(Rule { conditions })
-    }
-
-    fn matches(&self, task: &Task, today: NaiveDate) -> bool {
-        self.conditions.iter().all(|c| c.matches(task, today))
-    }
-}
-
-// ============================================================
-// Condition
-// ============================================================
-
-impl Condition {
-    fn parse(s: &str) -> Result<Self, String> {
-        // @context  or  -@context
-        if let Some(rest) = s.strip_prefix("-@") {
-            return Ok(Condition::Context {
-                pat: StrPat::parse(rest),
-                include: false,
-            });
-        }
-        if let Some(rest) = s.strip_prefix('@') {
-            return Ok(Condition::Context {
-                pat: StrPat::parse(rest),
-                include: true,
-            });
-        }
-        // +project  or  -+project
-        if let Some(rest) = s.strip_prefix("-+") {
-            return Ok(Condition::Project {
-                pat: StrPat::parse(rest),
-                include: false,
-            });
-        }
-        if let Some(rest) = s.strip_prefix('+') {
-            return Ok(Condition::Project {
-                pat: StrPat::parse(rest),
-                include: true,
-            });
-        }
-        // field=value
-        let (field, value) = s
-            .split_once('=')
-            .ok_or_else(|| format!("invalid condition (no '='): {s:?}"))?;
-        let field = field.trim().to_lowercase();
-        let value = value.trim();
-
-        match field.as_str() {
-            "context" | "ctx" => {
-                let (include, val) = if let Some(v) = value.strip_prefix('-') {
-                    (false, v)
-                } else {
-                    (true, value)
-                };
-                Ok(Condition::Context {
-                    pat: StrPat::parse(val),
-                    include,
-                })
-            }
-            "project" | "prj" => {
-                let (include, val) = if let Some(v) = value.strip_prefix('-') {
-                    (false, v)
-                } else {
-                    (true, value)
-                };
-                Ok(Condition::Project {
-                    pat: StrPat::parse(val),
-                    include,
-                })
-            }
-            "priority" | "pri" => Ok(Condition::Priority(PriSpec::parse(value)?)),
-            "due" => Ok(Condition::Due(DueSpec::parse(value)?)),
-            "done" => match value.to_lowercase().as_str() {
-                "true" | "yes" | "1" => Ok(Condition::Done(true)),
-                "false" | "no" | "0" => Ok(Condition::Done(false)),
-                _ => Err(format!("invalid done value: {value:?} (use true/false)")),
-            },
-            other => Err(format!("unknown filter field: {other:?}")),
-        }
-    }
-
-    fn matches(&self, task: &Task, today: NaiveDate) -> bool {
-        match self {
-            Condition::Context { pat, include: true } => match pat {
-                StrPat::Any => !task.contexts.is_empty(),
-                StrPat::None => task.contexts.is_empty(),
-                pat => task.contexts.iter().any(|c| pat.matches_str(c)),
-            },
-            Condition::Context {
-                pat,
-                include: false,
-            } => match pat {
-                StrPat::Any => task.contexts.is_empty(),
-                StrPat::None => !task.contexts.is_empty(),
-                pat => !task.contexts.iter().any(|c| pat.matches_str(c)),
-            },
-            Condition::Project { pat, include: true } => match pat {
-                StrPat::Any => !task.projects.is_empty(),
-                StrPat::None => task.projects.is_empty(),
-                pat => task.projects.iter().any(|p| pat.matches_str(p)),
-            },
-            Condition::Project {
-                pat,
-                include: false,
-            } => match pat {
-                StrPat::Any => task.projects.is_empty(),
-                StrPat::None => !task.projects.is_empty(),
-                pat => !task.projects.iter().any(|p| pat.matches_str(p)),
-            },
-            Condition::Priority(spec) => spec.matches(task.priority),
-            Condition::Due(spec) => spec.matches(task.due_date, today),
-            Condition::Done(expected) => task.finished == *expected,
-        }
-    }
-}
-
-// ============================================================
-// StrPat
-// ============================================================
-
-impl StrPat {
-    fn parse(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "any" => StrPat::Any,
-            "none" => StrPat::None,
-            _ => {
-                let star_prefix = s.starts_with('*');
-                let star_suffix = s.ends_with('*');
-                let inner = match (star_prefix, star_suffix) {
-                    (true, true) => &s[1..s.len() - 1],
-                    (true, false) => &s[1..],
-                    (false, true) => &s[..s.len() - 1],
-                    (false, false) => s,
-                };
-                let inner = inner.to_lowercase();
-                match (star_prefix, star_suffix) {
-                    (true, true) => StrPat::Contains(inner),
-                    (true, false) => StrPat::Suffix(inner),
-                    (false, true) => StrPat::Prefix(inner),
-                    (false, false) => StrPat::Exact(inner),
-                }
-            }
-        }
-    }
-
-    fn matches_str(&self, s: &str) -> bool {
-        let low = s.to_lowercase();
-        match self {
-            StrPat::Any => true,
-            StrPat::None => false,
-            StrPat::Exact(v) => &low == v,
-            StrPat::Prefix(v) => low.starts_with(v.as_str()),
-            StrPat::Suffix(v) => low.ends_with(v.as_str()),
-            StrPat::Contains(v) => low.contains(v.as_str()),
-        }
-    }
-}
-
-// ============================================================
-// PriSpec
-// ============================================================
-
-impl PriSpec {
-    fn parse(s: &str) -> Result<Self, String> {
-        match s.to_lowercase().as_str() {
-            "any" | "+" => return Ok(PriSpec::Any),
-            "none" | "-" => return Ok(PriSpec::None),
-            _ => {}
-        }
-        // Range: "a..c"
-        if let Some((lo, hi)) = s.split_once("..") {
-            return Ok(PriSpec::Range(parse_pri_char(lo)?, parse_pri_char(hi)?));
-        }
-        // "b+" = B or higher (more important) priority
-        if let Some(base) = s.strip_suffix('+') {
-            return Ok(PriSpec::AtLeast(parse_pri_char(base)?));
-        }
-        Ok(PriSpec::Exact(parse_pri_char(s)?))
-    }
-
-    fn matches(&self, priority: u8) -> bool {
-        match self {
-            PriSpec::Any => priority < NO_PRIORITY,
-            PriSpec::None => priority == NO_PRIORITY,
-            PriSpec::Exact(v) => priority == *v,
-            // "B or higher" = u8 ≤ 1 (A=0, B=1; lower u8 = higher priority)
-            PriSpec::AtLeast(v) => priority < NO_PRIORITY && priority <= *v,
-            PriSpec::Range(lo, hi) => priority < NO_PRIORITY && priority >= *lo && priority <= *hi,
-        }
-    }
-}
-
-fn parse_pri_char(s: &str) -> Result<u8, String> {
-    let s = s.trim();
-    if s.len() == 1 {
-        let c = s.chars().next().unwrap().to_ascii_lowercase();
-        if c.is_ascii_alphabetic() {
-            return Ok(c as u8 - b'a');
-        }
-    }
-    Err(format!("invalid priority letter: {s:?}"))
-}
-
-// ============================================================
-// DueSpec
-// ============================================================
-
-impl DueSpec {
-    fn parse(s: &str) -> Result<Self, String> {
-        match s.to_lowercase().as_str() {
-            "any" | "+" => return Ok(DueSpec::Any),
-            "none" | "-" => return Ok(DueSpec::None),
-            _ => {}
-        }
-        // "..value" = up to (UpTo)
-        if let Some(end_str) = s.strip_prefix("..") {
-            return Ok(DueSpec::UpTo(parse_date_offset(end_str)?));
-        }
-        // "value.." = from (From)
-        if let Some(start_str) = s.strip_suffix("..") {
-            return Ok(DueSpec::From(parse_date_offset(start_str)?));
-        }
-        // "start..end" = between (Between)
-        if let Some((start_str, end_str)) = s.split_once("..") {
-            return Ok(DueSpec::Between(
-                parse_date_offset(start_str)?,
-                parse_date_offset(end_str)?,
-            ));
-        }
-        // Single date = On
-        Ok(DueSpec::On(parse_date_offset(s)?))
-    }
-
-    fn matches(&self, due_date: Option<NaiveDate>, today: NaiveDate) -> bool {
-        match self {
-            DueSpec::Any => due_date.is_some(),
-            DueSpec::None => due_date.is_none(),
-            DueSpec::UpTo(n) => due_date
-                .map(|d| (d - today).num_days() <= *n)
-                .unwrap_or(false),
-            DueSpec::From(n) => due_date
-                .map(|d| (d - today).num_days() >= *n)
-                .unwrap_or(false),
-            DueSpec::Between(lo, hi) => due_date
-                .map(|d| {
-                    let diff = (d - today).num_days();
-                    diff >= *lo && diff <= *hi
-                })
-                .unwrap_or(false),
-            DueSpec::On(n) => due_date
-                .map(|d| (d - today).num_days() == *n)
-                .unwrap_or(false),
-        }
-    }
-}
-
-/// Parse a relative date expression to a day offset from today.
+/// Normalise user-friendly shorthands to `flt::Filter` syntax.
 ///
-/// Supports: `today` (0), `yesterday` (-1), `tomorrow` (+1),
-/// `+Nd` / `-Nd` (days), `+Nw` / `-Nw` (weeks), `+Nm` / `-Nm` (months ≈ 30d).
-fn parse_date_offset(s: &str) -> Result<i64, String> {
-    match s.to_lowercase().as_str() {
-        "today" => return Ok(0),
-        "yesterday" => return Ok(-1),
-        "tomorrow" => return Ok(1),
-        _ => {}
-    }
+/// Within each `;`-separated condition:
+///   `@ctx`  → `@=ctx`     (context include)
+///   `-@ctx` → `-@=ctx`    (context exclude)
+///   `+prj`  → `+=prj`     (project include)
+///   `-+prj` → `-+=prj`    (project exclude)
+///   `#tag`  → `#=tag`     (hashtag include)
+///
+/// Conditions that already contain `=` are passed through with only date-offset
+/// normalisation applied: `+Nd`/`+Nw`/`+Nm`/`+Ny` → `Nd`/`Nw`/`Nm`/`Ny`.
+fn normalize_shorthands(group: &str) -> String {
+    group
+        .split(';')
+        .map(|cond| {
+            let cond = cond.trim();
+            if cond.contains('=') {
+                // Already has '=' (flt native or partially normalised).
+                // Only normalise date offsets in the value part.
+                return normalize_date_offsets(cond);
+            }
+            if let Some(rest) = cond.strip_prefix("-@") {
+                format!("-@={rest}")
+            } else if let Some(rest) = cond.strip_prefix('@') {
+                format!("@={rest}")
+            } else if let Some(rest) = cond.strip_prefix("-+") {
+                format!("-+={rest}")
+            } else if let Some(rest) = cond.strip_prefix('+') {
+                format!("+={rest}")
+            } else if let Some(rest) = cond.strip_prefix('-') {
+                // e.g. `-#tag` is unusual but preserve negation
+                if let Some(tag) = rest.strip_prefix('#') {
+                    format!("-#={tag}")
+                } else {
+                    cond.to_string()
+                }
+            } else if let Some(rest) = cond.strip_prefix('#') {
+                format!("#={rest}")
+            } else {
+                cond.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+}
 
-    let (sign, rest) = if let Some(r) = s.strip_prefix('+') {
-        (1i64, r)
-    } else if let Some(r) = s.strip_prefix('-') {
-        (-1i64, r)
+/// Strip leading `+` from date-offset patterns (`+Nd` → `Nd`) in value
+/// positions so that `flt`'s `human_to_date` can parse them.
+///
+/// Only the value part (after the first `=`) is modified.
+fn normalize_date_offsets(cond: &str) -> String {
+    if let Some(eq_pos) = cond.find('=') {
+        let (key, val) = cond.split_at(eq_pos + 1);
+        format!("{key}{}", strip_plus_offsets(val))
     } else {
-        return Err(format!(
-            "invalid date offset: {s:?} (expected today/yesterday/tomorrow/+Nd/-Nd)"
-        ));
-    };
+        cond.to_string()
+    }
+}
 
-    if let Some(n_str) = rest.strip_suffix('d') {
-        let n: i64 = n_str
-            .parse()
-            .map_err(|_| format!("invalid date offset: {s:?}"))?;
-        return Ok(sign * n);
+/// Replace `+<digits><unit>` with `<digits><unit>` where unit ∈ {d, w, m, y}.
+fn strip_plus_offsets(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'+' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+            // Skip the '+' — it's a date-offset prefix, not an operator
+            i += 1;
+            continue;
+        }
+        result.push(bytes[i] as char);
+        i += 1;
     }
-    if let Some(n_str) = rest.strip_suffix('w') {
-        let n: i64 = n_str
-            .parse()
-            .map_err(|_| format!("invalid date offset: {s:?}"))?;
-        return Ok(sign * n * 7);
-    }
-    if let Some(n_str) = rest.strip_suffix('m') {
-        let n: i64 = n_str
-            .parse()
-            .map_err(|_| format!("invalid date offset: {s:?}"))?;
-        return Ok(sign * n * 30);
-    }
-    Err(format!(
-        "invalid date offset: {s:?} (expected +Nd, +Nw, or +Nm)"
-    ))
+    result
 }
 
 // ============================================================
@@ -453,56 +148,67 @@ mod tests {
         chrono::Local::now().date_naive()
     }
 
+    fn task_from(line: &str) -> Task {
+        Task::parse(line, today())
+    }
+
     fn task_ctx(ctx: &str) -> Task {
-        let mut t = Task::default();
-        t.contexts.push(ctx.to_string());
-        t
+        task_from(&format!("task @{ctx}"))
     }
 
     fn task_pri(p: char) -> Task {
-        let mut t = Task::default();
-        t.priority = p.to_ascii_lowercase() as u8 - b'a';
-        t
+        task_from(&format!("({}) task", p.to_ascii_uppercase()))
     }
 
     fn task_due(days: i64) -> Task {
-        let mut t = Task::default();
-        t.due_date = Some(today() + Duration::days(days));
-        t
+        let d = today() + Duration::days(days);
+        task_from(&format!("task due:{}", d.format("%Y-%m-%d")))
     }
 
-    // ── parsing ──────────────────────────────────────────────────────────────
+    // ── shorthand normalisation ───────────────────────────────────────────────
 
     #[test]
-    fn parse_context_shorthand() {
-        assert!(Filter::parse("@today").is_ok());
-        assert!(Filter::parse("-@work").is_ok());
-    }
-
-    #[test]
-    fn parse_field_eq_value() {
-        assert!(Filter::parse("context=today").is_ok());
-        assert!(Filter::parse("pri=any").is_ok());
-        assert!(Filter::parse("due=..+2d").is_ok());
-        assert!(Filter::parse("done=false").is_ok());
+    fn normalize_context_shorthand() {
+        assert_eq!(normalize_shorthands("@today"), "@=today");
+        assert_eq!(normalize_shorthands("-@work"), "-@=work");
     }
 
     #[test]
-    fn parse_or_and_combined() {
-        assert!(Filter::parse("@today~pri=any~due=any").is_ok());
-        assert!(Filter::parse("@joint;due=..+2d").is_ok());
+    fn normalize_project_shorthand() {
+        assert_eq!(normalize_shorthands("+shopping"), "+=shopping");
+        assert_eq!(normalize_shorthands("-+shopping"), "-+=shopping");
     }
 
     #[test]
-    fn parse_error_unknown_field() {
-        assert!(Filter::parse("bogus=value").is_err());
+    fn normalize_hashtag_shorthand() {
+        assert_eq!(normalize_shorthands("#foo"), "#=foo");
+    }
+
+    #[test]
+    fn normalize_date_offset_in_due() {
+        assert_eq!(normalize_shorthands("due=..+1d"), "due=..1d");
+        assert_eq!(normalize_shorthands("due=+2d.."), "due=2d..");
+        assert_eq!(normalize_shorthands("due=today..+5d"), "due=today..5d");
+    }
+
+    #[test]
+    fn normalize_compound_group() {
+        assert_eq!(normalize_shorthands("@joint;due=..+1d"), "@=joint;due=..1d");
+    }
+
+    #[test]
+    fn normalize_passthrough_already_eq() {
+        // Conditions that already have '=' pass through (only date offsets stripped).
+        assert_eq!(normalize_shorthands("pri=any"), "pri=any");
+        assert_eq!(normalize_shorthands("due=any"), "due=any");
+        assert_eq!(normalize_shorthands("done=none"), "done=none");
     }
 
     // ── context matching ─────────────────────────────────────────────────────
 
     #[test]
     fn context_exact_match() {
-        let f = Filter::parse("@today").unwrap();
+        let f = Filter::parse("@today");
         assert!(f.matches(&task_ctx("today"), today()));
         assert!(!f.matches(&Task::default(), today()));
         assert!(!f.matches(&task_ctx("work"), today()));
@@ -510,7 +216,7 @@ mod tests {
 
     #[test]
     fn context_exclude() {
-        let f = Filter::parse("-@work").unwrap();
+        let f = Filter::parse("-@work");
         assert!(f.matches(&Task::default(), today()));
         assert!(f.matches(&task_ctx("home"), today()));
         assert!(!f.matches(&task_ctx("work"), today()));
@@ -518,8 +224,8 @@ mod tests {
 
     #[test]
     fn context_any_and_none() {
-        let any = Filter::parse("@any").unwrap();
-        let none = Filter::parse("@none").unwrap();
+        let any = Filter::parse("@=any");
+        let none = Filter::parse("@=none");
         assert!(!any.matches(&Task::default(), today()));
         assert!(any.matches(&task_ctx("foo"), today()));
         assert!(none.matches(&Task::default(), today()));
@@ -528,7 +234,7 @@ mod tests {
 
     #[test]
     fn context_wildcard_prefix() {
-        let f = Filter::parse("@work*").unwrap();
+        let f = Filter::parse("@=work*");
         assert!(f.matches(&task_ctx("work"), today()));
         assert!(f.matches(&task_ctx("workout"), today()));
         assert!(!f.matches(&task_ctx("atwork"), today()));
@@ -538,7 +244,7 @@ mod tests {
 
     #[test]
     fn priority_any() {
-        let f = Filter::parse("pri=any").unwrap();
+        let f = Filter::parse("pri=any");
         assert!(f.matches(&task_pri('a'), today()));
         assert!(f.matches(&task_pri('z'), today()));
         assert!(!f.matches(&Task::default(), today()));
@@ -546,32 +252,22 @@ mod tests {
 
     #[test]
     fn priority_none() {
-        let f = Filter::parse("pri=none").unwrap();
+        let f = Filter::parse("pri=none");
         assert!(f.matches(&Task::default(), today()));
         assert!(!f.matches(&task_pri('a'), today()));
     }
 
     #[test]
     fn priority_exact() {
-        let f = Filter::parse("pri=b").unwrap();
+        let f = Filter::parse("pri=B");
         assert!(!f.matches(&task_pri('a'), today()));
         assert!(f.matches(&task_pri('b'), today()));
         assert!(!f.matches(&task_pri('c'), today()));
     }
 
     #[test]
-    fn priority_at_least_b_plus() {
-        // pri=b+ means B or higher (more important), i.e. A or B
-        let f = Filter::parse("pri=b+").unwrap();
-        assert!(f.matches(&task_pri('a'), today()));
-        assert!(f.matches(&task_pri('b'), today()));
-        assert!(!f.matches(&task_pri('c'), today()));
-        assert!(!f.matches(&Task::default(), today()));
-    }
-
-    #[test]
     fn priority_range() {
-        let f = Filter::parse("pri=b..d").unwrap();
+        let f = Filter::parse("pri=B..D");
         assert!(!f.matches(&task_pri('a'), today()));
         assert!(f.matches(&task_pri('b'), today()));
         assert!(f.matches(&task_pri('c'), today()));
@@ -583,7 +279,7 @@ mod tests {
 
     #[test]
     fn due_any() {
-        let f = Filter::parse("due=any").unwrap();
+        let f = Filter::parse("due=any");
         assert!(!f.matches(&Task::default(), today()));
         assert!(f.matches(&task_due(0), today()));
         assert!(f.matches(&task_due(10), today()));
@@ -591,24 +287,25 @@ mod tests {
 
     #[test]
     fn due_none() {
-        let f = Filter::parse("due=none").unwrap();
+        let f = Filter::parse("due=none");
         assert!(f.matches(&Task::default(), today()));
         assert!(!f.matches(&task_due(0), today()));
     }
 
     #[test]
     fn due_up_to_2d() {
-        let f = Filter::parse("due=..+2d").unwrap();
+        // +2d is normalised to 2d
+        let f = Filter::parse("due=..+2d");
         assert!(f.matches(&task_due(-5), today())); // overdue
         assert!(f.matches(&task_due(0), today())); // today
-        assert!(f.matches(&task_due(2), today())); // day after tomorrow
+        assert!(f.matches(&task_due(2), today())); // 2 days out
         assert!(!f.matches(&task_due(3), today())); // 3 days out
         assert!(!f.matches(&Task::default(), today())); // no due date
     }
 
     #[test]
     fn due_from() {
-        let f = Filter::parse("due=+7d..").unwrap();
+        let f = Filter::parse("due=+7d..");
         assert!(!f.matches(&task_due(6), today()));
         assert!(f.matches(&task_due(7), today()));
         assert!(f.matches(&task_due(100), today()));
@@ -617,7 +314,7 @@ mod tests {
 
     #[test]
     fn due_on_today() {
-        let f = Filter::parse("due=today").unwrap();
+        let f = Filter::parse("due=today");
         assert!(f.matches(&task_due(0), today()));
         assert!(!f.matches(&task_due(1), today()));
         assert!(!f.matches(&task_due(-1), today()));
@@ -626,19 +323,26 @@ mod tests {
     // ── done matching ─────────────────────────────────────────────────────────
 
     #[test]
-    fn done_false() {
-        let f = Filter::parse("done=false").unwrap();
-        let mut done = Task::default();
-        done.finished = true;
+    fn done_none() {
+        let f = Filter::parse("done=none");
+        let done = task_from("x 2026-01-01 2026-01-01 finished task");
         assert!(f.matches(&Task::default(), today()));
         assert!(!f.matches(&done, today()));
+    }
+
+    #[test]
+    fn done_any() {
+        let f = Filter::parse("done=any");
+        let done = task_from("x 2026-01-01 2026-01-01 finished task");
+        assert!(!f.matches(&Task::default(), today()));
+        assert!(f.matches(&done, today()));
     }
 
     // ── composite ────────────────────────────────────────────────────────────
 
     #[test]
     fn or_rule_any_match_wins() {
-        let f = Filter::parse("@today~pri=any~due=any").unwrap();
+        let f = Filter::parse("@today~pri=any~due=any");
         assert!(f.matches(&task_ctx("today"), today()));
         assert!(f.matches(&task_pri('a'), today()));
         assert!(f.matches(&task_due(5), today()));
@@ -647,10 +351,12 @@ mod tests {
 
     #[test]
     fn and_rule_all_must_match() {
-        let f = Filter::parse("@joint;due=..+2d").unwrap();
+        let f = Filter::parse("@joint;due=..+2d");
         // both conditions met
-        let mut t = task_ctx("joint");
-        t.due_date = Some(today() + Duration::days(1));
+        let t = task_from(&format!(
+            "task @joint due:{}",
+            (today() + Duration::days(1)).format("%Y-%m-%d")
+        ));
         assert!(f.matches(&t, today()));
         // missing due date
         assert!(!f.matches(&task_ctx("joint"), today()));
@@ -663,5 +369,19 @@ mod tests {
         let f = Filter::deny_all();
         assert!(!f.matches(&Task::default(), today()));
         assert!(!f.matches(&task_ctx("today"), today()));
+    }
+
+    #[test]
+    fn pipe_or_separator_works() {
+        let f = Filter::parse("@today|pri=any");
+        assert!(f.matches(&task_ctx("today"), today()));
+        assert!(f.matches(&task_pri('b'), today()));
+    }
+
+    #[test]
+    fn unknown_field_produces_deny_all() {
+        // Unknown fields parse without error but match nothing (flt passthrough behaviour)
+        let f = Filter::parse("bogus=value");
+        assert!(!f.matches(&Task::default(), today()));
     }
 }
